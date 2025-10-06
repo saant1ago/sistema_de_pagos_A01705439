@@ -83,3 +83,109 @@ def test_transaction_hard_block_rejection():
     data = r.json()
     assert data["transaction_id"] == 99
     assert data["decision"] == "REJECTED"
+
+
+def test_transaction_accept_path_low_risk():
+    """Bajo riesgo, sin banderas -> ACCEPTED (cubre rama 'else')."""
+    body = {
+        "transaction_id": 1,
+        "amount_mxn": 100.0,              # por debajo de cualquier umbral
+        "customer_txn_30d": 0,
+        "chargeback_count": 0,
+        "hour": 14,                       # no es noche
+        "product_type": "digital",
+        "latency_ms": 100,
+        "user_reputation": "new",         # 0 puntos
+        "device_fingerprint_risk": "low", # 0
+        "ip_risk": "low",                 # 0
+        "email_risk": "low",              # 0
+        "bin_country": "MX",
+        "ip_country": "MX",
+    }
+    r = client.post("/transaction", json=body)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["decision"] == "ACCEPTED"
+    assert data["risk_score"] == 0
+    assert data["transaction_id"] == 1
+
+
+def test_transaction_geo_mismatch_and_night_and_latency():
+    """Geo mismatch + noche + latencia extrema."""
+    body = {
+        "transaction_id": 2,
+        "amount_mxn": 400.0,
+        "customer_txn_30d": 0,
+        "chargeback_count": 0,
+        "hour": 23,                       # noche -> +1
+        "product_type": "digital",
+        "latency_ms": 3000,               # >= 2500 -> +2
+        "user_reputation": "new",         # 0
+        "device_fingerprint_risk": "low",
+        "ip_risk": "low",
+        "email_risk": "low",
+        "bin_country": "US",
+        "ip_country": "MX",               # mismatch -> +2
+    }
+    r = client.post("/transaction", json=body)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    # score esperado: 1 (noche) + 2 (lat) + 2 (geo) = 5 -> IN_REVIEW por defecto (review_at=4, reject_at=10)
+    assert data["decision"] == "IN_REVIEW"
+    assert "night_hour:23(+1)" in data["reasons"]
+    assert "geo_mismatch:US!=MX(+2)" in data["reasons"]
+    assert "latency_extreme:3000ms(+2)" in data["reasons"]
+
+
+def test_transaction_high_amount_with_new_user_kicker():
+    """High amount para tipo 'physical' + bonus por user nuevo."""
+    body = {
+        "transaction_id": 3,
+        "amount_mxn": 6000.0,             # umbral exacto physical (>= dispara)
+        "customer_txn_30d": 0,
+        "chargeback_count": 0,
+        "hour": 10,
+        "product_type": "physical",
+        "latency_ms": 180,
+        "user_reputation": "new",         # activa new_user_high_amount (+2)
+        "device_fingerprint_risk": "low",
+        "ip_risk": "low",
+        "email_risk": "low",
+        "bin_country": "MX",
+        "ip_country": "MX",
+    }
+    r = client.post("/transaction", json=body)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    # +2 (high_amount) +2 (new_user_high_amount) = 4 -> IN_REVIEW
+    assert data["decision"] == "IN_REVIEW"
+    assert "high_amount:physical:6000.0(+2)" in data["reasons"]
+    assert "new_user_high_amount(+2)" in data["reasons"]
+
+
+def test_transaction_trusted_frequency_buffer():
+    """Usuario trusted con frecuencia alta aplica buffer -1 si score > 0."""
+    body = {
+        "transaction_id": 4,
+        "amount_mxn": 4500.0,             # default _default=4000 -> high_amount +2
+        "customer_txn_30d": 5,            # >=3
+        "chargeback_count": 0,
+        "hour": 12,
+        "product_type": "unknown",        # usa _default
+        "latency_ms": 2600,               # +2 (extrema)
+        "user_reputation": "trusted",     # -2
+        "device_fingerprint_risk": "low",
+        "ip_risk": "medium",              # +2
+        "email_risk": "low",
+        "bin_country": "MX",
+        "ip_country": "MX",
+    }
+    r = client.post("/transaction", json=body)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    # score base: +2 (ip medium) +2 (high_amount) +2 (latencia) -2 (trusted) = 4
+    # buffer: -1 => 3 (y razón presente)
+    assert "frequency_buffer(-1)" in data["reasons"]
+    assert data["risk_score"] == 3
+    assert data["decision"] == "IN_REVIEW"  # review_at=4, pero ojo: si cambian thresholds podría ser ACCEPTED
+
