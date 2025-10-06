@@ -164,28 +164,29 @@ def test_transaction_high_amount_with_new_user_kicker():
 
 
 def test_transaction_trusted_frequency_buffer():
-    """Usuario trusted con frecuencia alta aplica buffer -1 si score > 0."""
+    """Usuario trusted con frecuencia alta aplica buffer -1 y queda en IN_REVIEW."""
     body = {
         "transaction_id": 4,
-        "amount_mxn": 4500.0,             # default _default=4000 -> high_amount +2
+        "amount_mxn": 4500.0,             # digital threshold=2500 -> high_amount +2
         "customer_txn_30d": 5,            # >=3
         "chargeback_count": 0,
-        "hour": 12,
-        "product_type": "unknown",        # usa _default
+        "hour": 23,                       # noche -> +1 (necesario para llegar a IN_REVIEW)
+        "product_type": "digital",        # ✅ enum válido
         "latency_ms": 2600,               # +2 (extrema)
         "user_reputation": "trusted",     # -2
-        "device_fingerprint_risk": "low",
+        "device_fingerprint_risk": "low", # 0
         "ip_risk": "medium",              # +2
-        "email_risk": "low",
+        "email_risk": "low",              # 0
         "bin_country": "MX",
         "ip_country": "MX",
     }
     r = client.post("/transaction", json=body)
     assert r.status_code == 200, r.text
     data = r.json()
-    # score base: +2 (ip medium) +2 (high_amount) +2 (latencia) -2 (trusted) = 4
-    # buffer: -1 => 3 (y razón presente)
+    # score pre-buffer: +2 (ip) +2 (high_amount) +2 (lat) +1 (night) -2 (trusted) = 5
+    # buffer -1 => 4 -> IN_REVIEW (con defaults review_at=4)
     assert "frequency_buffer(-1)" in data["reasons"]
-    assert data["risk_score"] == 3
-    assert data["decision"] == "IN_REVIEW"  # review_at=4, pero ojo: si cambian thresholds podría ser ACCEPTED
+    assert "night_hour:23(+1)" in data["reasons"]
+    assert data["risk_score"] == 4
+    assert data["decision"] == "IN_REVIEW"
 
